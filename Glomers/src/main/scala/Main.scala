@@ -1,7 +1,8 @@
 package com.github.madtrick.glomers
 
 object Main extends App {
-  var msgCounter = 0
+  var msgCounter             = 0
+  var nodeId: Option[String] = None
 
   for (line <- io.Source.stdin.getLines()) {
     val json = ujson.read(line)
@@ -9,12 +10,13 @@ object Main extends App {
     val src     = json("src").str
     val dest    = json("dest").str
     val msgType = json("body")("type").str
-    val msgId   = json("body")("msg_id").num
+    val msgId   = json("body")("msg_id").num.toInt
 
     msgCounter += 1
 
     msgType match {
       case "init" => {
+        nodeId = Some(json("body")("node_id").str)
         println(
           ujson.write(
             ujson.Obj(
@@ -42,6 +44,22 @@ object Main extends App {
                 "msg_id"      -> msgCounter,
                 "in_reply_to" -> msgId,
                 "echo"        -> echo
+              )
+            )
+          )
+        )
+      }
+      case "generate" => {
+        println(
+          ujson.write(
+            ujson.Obj(
+              "src"  -> dest,
+              "dest" -> src,
+              "body" -> ujson.Obj(
+                "type"        -> "generate_ok",
+                "msg_id"      -> msgCounter,
+                "in_reply_to" -> msgId,
+                "id"          -> (nodeId.get + "_" + msgCounter)
               )
             )
           )
