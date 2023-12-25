@@ -39,3 +39,11 @@ Run the app
 ```sh
 ./maelstrom/maelstrom test -w unique-ids --bin out/Glomers/assembly.dest/out.jar --time-limit 30 --rate 1000 --node-count 3 --availability total --nemesis partition
 ```
+
+## Broadcast
+
+[Challenge #3a: Single-Node Broadcast](https://fly.io/dist-sys/3a/)
+
+```sh
+./maelstrom test -w broadcast --bin ~/go/bin/maelstrom-broadcast --node-count 1 --time-limit 20 --rate 10
+```
