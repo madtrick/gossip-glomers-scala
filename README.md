@@ -22,6 +22,22 @@ Run the app
 ./out/Glomers/assembly.dest/out.jar
 ```
 
+## Tests
+
+This project uses the `FunSuite` from [scalatests](https://www.scalatest.org/at_a_glance/FunSuite) (since that seems to be the one used in the Databricks codebase).
+
+To run the Tests
+
+```sh
+./.metals/millw Glomers.test
+```
+
+To run the tests in watch mode
+
+```sh
+./.metals/millw --watch Glomers.test
+```
+
 # Glomers
 
 ## Echo
