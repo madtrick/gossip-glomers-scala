@@ -40,6 +40,10 @@ To run the tests in watch mode
 
 # Glomers
 
+Note that the commands in the following sections assume that you have a local
+copy of [maelstrom](https://github.com/jepsen-io/maelstrom/) in the same folder
+as this project.
+
 ## Echo
 
 [Challenge#1 Echo](https://fly.io/dist-sys/1/)
