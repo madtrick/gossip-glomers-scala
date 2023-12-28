@@ -63,3 +63,27 @@ To run the tests in watch mode
 ```sh
 ./maelstrom test -w broadcast --bin ~/go/bin/maelstrom-broadcast --node-count 1 --time-limit 20 --rate 10
 ```
+
+[Challenge #3b: Multi-Node Broadcast](https://fly.io/dist-sys/3b/)
+
+On this iteration of the glomer I create node ensembles. Each node ensemble has
+a head (or leader). The messages can flow from non-leader nodes to **their**
+leader, from the leader of an ensemble to the rest of the nodes in the ensemble
+and from a leader to its previous and next leader. Nodes from different
+ensembles can't communicate with each other.
+
+```sh
+GLOMER=broadcast ./maelstrom/maelstrom test -w broadcast --bin out/Glomers/assembly.dest/out.jar --node-count 5 --time-limit 20 --rate 1
+```
+
+[Challenge #3c: Fault Tolerant Broadcast](https://fly.io/dist-sys/3c/)
+
+On this iteration of the glomer I use a quite simple approach to guarantee
+message delivery. For each message delivered to another node in a node ensemble
+I keep track of it until I receive a delivery confirmation
+`deliver_broadcast_ok`. While the confirmation is not received I keep sending
+the message.
+
+```sh
+GLOMER=broadcast ./maelstrom/maelstrom test -w broadcast --bin out/Glomers/assembly.dest/out.jar --node-count 5 --time-limit 20 --rate 10 --nemesis partition
+```

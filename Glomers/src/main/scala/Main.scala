@@ -2,13 +2,17 @@ package com.github.madtrick.glomers
 
 import java.util.ArrayList
 import scala.collection.mutable.ListBuffer
+import java.util.concurrent.ScheduledThreadPoolExecutor
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.ConcurrentHashMap
 
 class Broadcast {
   private var msgCounter             = 0
   private var nodeId: Option[NodeId] = None
   // TODO: check other list types (https://alvinalexander.com/scala/how-add-elements-to-a-list-in-scala-listbuffer-immutable/)
-  private var messages: ListBuffer[Int] = new ListBuffer[Int]()
-  private var neighbours: List[String]  = List()
+  private var messages: ListBuffer[Int]                                = new ListBuffer[Int]()
+  private var neighbours: List[String]                                 = List()
+  private val inflightMessages: ConcurrentHashMap[String, ujson.Value] = new ConcurrentHashMap()
 
   def log(msg: String): Unit = {
     System.err.println(msg)
@@ -19,6 +23,20 @@ class Broadcast {
   }
 
   def run(): Unit = {
+    val executor = new ScheduledThreadPoolExecutor(1)
+    val task = new Runnable {
+      def run = {
+        val keys = inflightMessages.keySet()
+        keys.forEach((key: String) => {
+          // System.err.println(s"[thread] $key")
+          val message = inflightMessages.get(key)
+          println(ujson.write(message))
+        })
+      }
+    }
+
+    executor.scheduleAtFixedRate(task, 0, 500, TimeUnit.MILLISECONDS)
+
     for (line <- io.Source.stdin.getLines()) {
       log(s"[recv] $line")
       val json = ujson.read(line)
@@ -68,22 +86,24 @@ class Broadcast {
         }
         case "broadcast" => {
           val message = json("body")("message").num.toInt
+          val mapKey  = s"$src-$msgId"
 
           neighbours.foreach((neighbour) => {
-            send(
-              ujson.write(
-                ujson.Obj(
-                  "src"  -> nodeId.get.id,
-                  "dest" -> neighbour,
-                  "body" -> ujson.Obj(
-                    "type"    -> "deliver_broadcast",
-                    "message" -> message,
-                    "msg_id"  -> msgCounter,
-                    "origin"  -> nodeId.get.id
-                  )
-                )
+            val deliveryMessage = ujson.Obj(
+              "src"  -> nodeId.get.id,
+              "dest" -> neighbour,
+              "body" -> ujson.Obj(
+                "type"    -> "deliver_broadcast",
+                "message" -> message,
+                "msg_id"  -> msgCounter,
+                "origin"  -> nodeId.get.id
               )
             )
+
+            msgCounter += 1
+
+            inflightMessages.put(mapKey, deliveryMessage)
+            send(ujson.write(deliveryMessage))
           })
 
           messages += message
@@ -145,7 +165,12 @@ class Broadcast {
             )
           )
         }
-        case "deliver_broadcast_ok" => {}
+        case "deliver_broadcast_ok" => {
+          val mapKey = s"$src-$msgId"
+
+          // Remove this message from the set of messages to be redelivered
+          inflightMessages.remove(mapKey)
+        }
         case "read" => {
 
           send(
