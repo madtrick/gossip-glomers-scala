@@ -5,6 +5,297 @@ import scala.collection.mutable.ListBuffer
 import java.util.concurrent.ScheduledThreadPoolExecutor
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.ConcurrentHashMap
+import scala.concurrent.Future
+import scala.concurrent.Await
+import scala.concurrent.ExecutionContext.Implicits.global
+import scala.concurrent.duration._
+import scala.language.postfixOps
+import scala.concurrent.Promise
+import java.util.concurrent.ExecutorService
+import java.util.concurrent.Executors
+import java.util.concurrent.atomic.AtomicInteger
+
+class ConcurrencyProof {
+  def run = {
+    val f: Future[String] = Future {
+      Thread.sleep(20000)
+      "future value"
+    }
+
+    f.onComplete {
+      case s => {
+        Console.println("Console.println OK!")
+        System.out.println("System.out.println OK!")
+      }
+    }
+
+    println("Gracias")
+
+    Await.ready(f, 60 seconds)
+    ()
+  }
+}
+
+class GrowOnlyCounter {
+  private val SEQ_KV                      = "seq-kv"
+  private val KV_KEY                      = "value"
+  private var msgCounter                  = new AtomicInteger(0)
+  private var nodeId: Option[NodeId]      = None
+  private var threadPool: ExecutorService = Executors.newFixedThreadPool(5)
+  private val inflightMessages: ConcurrentHashMap[Int, Promise[ujson.Value]] =
+    new ConcurrentHashMap()
+
+  def log(msg: String): Unit = {
+    System.err.println(msg)
+  }
+  def send(msg: String): Unit = {
+    log(s"[send] $msg")
+    println(msg)
+  }
+
+  def run(): Unit = {
+    for (line <- io.Source.stdin.getLines()) {
+      log(s"[recv] $line")
+      val json = ujson.read(line)
+
+      val src     = json("src").str
+      val dest    = json("dest").str
+      val msgType = json("body")("type").str
+      val msgId   = json("body").obj.get("msg_id")
+
+      msgType match {
+        case "init" => {
+          nodeId = Some(NodeId(json("body")("node_id").str))
+
+          /** Initialize the seq-kv store.
+            *
+            * We don't care if this call fails because the value has already been initialized by
+            * another node. We could make it more efficient by assigning the initialization task to
+            * just one node (but that would compromise availability)
+            */
+          send(
+            ujson.write(
+              ujson.Obj(
+                "src"  -> nodeId.get.id,
+                "dest" -> SEQ_KV,
+                "body" -> ujson.Obj(
+                  "type"                 -> "cas",
+                  "key"                  -> KV_KEY,
+                  "from"                 -> 0,
+                  "to"                   -> 0,
+                  "create_if_not_exists" -> true,
+                  "msg_id"               -> msgCounter.incrementAndGet()
+                )
+              )
+            )
+          )
+
+          send(
+            ujson.write(
+              ujson.Obj(
+                "src"  -> dest,
+                "dest" -> src,
+                "body" -> ujson.Obj(
+                  "type"        -> "init_ok",
+                  "in_reply_to" -> msgId.get.num.toInt,
+                  "msg_id"      -> msgCounter.incrementAndGet()
+                )
+              )
+            )
+          )
+        }
+        case "read_ok" => {
+          val inReplyTo = json("body")("in_reply_to").num.toInt
+
+          if (inflightMessages.containsKey(inReplyTo)) {
+            inflightMessages.get(inReplyTo).success(json)
+          } else {
+            throw new Error("Missing reply key in KV call")
+          }
+        }
+        case "error" => {
+          val inReplyTo = json("body")("in_reply_to").num.toInt
+
+          if (inflightMessages.containsKey(inReplyTo)) {
+            inflightMessages.get(inReplyTo).success(json)
+          } else {
+            throw new Error("Error msg")
+          }
+        }
+        case "cas_ok" => {
+          val inReplyTo = json("body")("in_reply_to").num.toInt
+
+          if (inflightMessages.containsKey(inReplyTo)) {
+            inflightMessages.get(inReplyTo).success(json)
+          }
+        }
+        case "add" => {
+          threadPool.execute(new Runnable() {
+            def run = {
+              val delta = json("body")("delta").num.toInt
+              var done  = false
+
+              while (!done) {
+                log("[info] >>>")
+                val readPromise        = Promise[ujson.Value]()
+                val readMessageCounter = msgCounter.incrementAndGet()
+
+                inflightMessages.put(readMessageCounter, readPromise)
+
+                // NOTE: this method comes from the "node" not the runnable
+                send(
+                  ujson.write(
+                    ujson.Obj(
+                      "src"  -> nodeId.get.id,
+                      "dest" -> SEQ_KV,
+                      "body" -> ujson.Obj(
+                        "type"   -> "read",
+                        "key"    -> KV_KEY,
+                        "msg_id" -> readMessageCounter
+                      )
+                    )
+                  )
+                )
+
+                val addPromise = Promise[ujson.Value]()
+                readPromise.future.foreach((read) => {
+                  log("[info] Got response to KV read")
+                  val value         = read("body")("value").num.toInt
+                  val addMsgCounter = msgCounter.incrementAndGet()
+
+                  send(
+                    ujson.write(
+                      ujson.Obj(
+                        "src"  -> nodeId.get.id,
+                        "dest" -> SEQ_KV,
+                        "body" -> ujson.Obj(
+                          "type"   -> "cas",
+                          "key"    -> KV_KEY,
+                          "from"   -> value,
+                          "to"     -> (value + delta),
+                          "msg_id" -> addMsgCounter
+                        )
+                      )
+                    )
+                  )
+
+                  inflightMessages.put(addMsgCounter, addPromise)
+
+                  addPromise
+                })
+
+                val add = Await.result(addPromise.future, 10.seconds)
+                log("[info] got response to KV cas")
+                val responseType = add("body")("type").str
+
+                if (responseType != "error") {
+                  done = true
+                }
+              }
+
+              send(
+                ujson.write(
+                  ujson.Obj(
+                    "src"  -> dest,
+                    "dest" -> src,
+                    "body" -> ujson.Obj(
+                      "type"        -> "add_ok",
+                      "in_reply_to" -> msgId.get.num.toInt,
+                      "msg_id"      -> msgCounter.incrementAndGet()
+                    )
+                  )
+                )
+              )
+            }
+          })
+        }
+        case "read" => {
+          threadPool.execute(new Runnable() {
+            def run = {
+              var done         = false
+              var kvValue: Int = -1
+
+              while (!done) {
+                val readPromise        = Promise[ujson.Value]()
+                val readMessageCounter = msgCounter.incrementAndGet()
+
+                inflightMessages.put(readMessageCounter, readPromise)
+
+                // NOTE: this method comes from the "node" not the runnable
+                send(
+                  ujson.write(
+                    ujson.Obj(
+                      "src"  -> nodeId.get.id,
+                      "dest" -> SEQ_KV,
+                      "body" -> ujson.Obj(
+                        "type"   -> "read",
+                        "key"    -> KV_KEY,
+                        "msg_id" -> readMessageCounter
+                      )
+                    )
+                  )
+                )
+
+                val addPromise = Promise[ujson.Value]()
+                readPromise.future.foreach((read) => {
+                  log("[info] Got response to KV read")
+                  val value = read("body")("value").num.toInt
+                  // NOTE: set "kvValue" (what we want to return) to the value
+                  // we are checking
+                  kvValue = value
+                  val addMsgCounter = msgCounter.incrementAndGet()
+
+                  send(
+                    ujson.write(
+                      ujson.Obj(
+                        "src"  -> nodeId.get.id,
+                        "dest" -> SEQ_KV,
+                        "body" -> ujson.Obj(
+                          "type"   -> "cas",
+                          "key"    -> KV_KEY,
+                          "from"   -> value,
+                          "to"     -> value,
+                          "msg_id" -> addMsgCounter
+                        )
+                      )
+                    )
+                  )
+
+                  inflightMessages.put(addMsgCounter, addPromise)
+
+                  addPromise
+                })
+
+                val add          = Await.result(addPromise.future, 10.seconds)
+                val responseType = add("body")("type").str
+
+                if (responseType != "error") {
+                  done = true
+                }
+              }
+
+              send(
+                ujson.write(
+                  ujson.Obj(
+                    "src"  -> dest,
+                    "dest" -> src,
+                    "body" -> ujson.Obj(
+                      "type"        -> "read_ok",
+                      "value"       -> kvValue,
+                      "in_reply_to" -> msgId.get.num.toInt,
+                      "msg_id"      -> msgCounter.incrementAndGet()
+                    )
+                  )
+                )
+              )
+            }
+          })
+        }
+      }
+    }
+  }
+
+}
 
 class Broadcast {
   private var msgCounter             = 0
@@ -50,6 +341,9 @@ class Broadcast {
 
       msgType match {
         case "init" => {
+          // NOTE: The handling of the "init" message could be common to all
+          // kind of workloads. The workloads would be created only **after**
+          // handling this message.
           nodeId = Some(NodeId(json("body")("node_id").str))
           // TODO: is there a more efficient way of converting the array of ujson.Value to a Seq[String]?
           val nodeIds = json("body")("node_ids").arr.map(_.str).toSeq
@@ -263,6 +557,10 @@ object Broadcast {
 object Main extends App {
   if (sys.env.get("GLOMER").get == "broadcast") {
     new Broadcast().run()
+  } else if (sys.env.get("GLOMER").get == "concurrency") {
+    new ConcurrencyProof().run
+  } else if (sys.env.get("GLOMER").get == "counter") {
+    new GrowOnlyCounter().run
   } else {
     var msgCounter             = 0
     var nodeId: Option[String] = None

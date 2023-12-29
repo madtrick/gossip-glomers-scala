@@ -91,3 +91,13 @@ the message.
 ```sh
 GLOMER=broadcast ./maelstrom/maelstrom test -w broadcast --bin out/Glomers/assembly.dest/out.jar --node-count 5 --time-limit 20 --rate 10 --nemesis partition
 ```
+
+## Grow only counter
+
+[Challenge #4: Grow-Only Counter](https://fly.io/dist-sys/4/)
+
+```sh
+GLOMER=counter ./maelstrom/maelstrom test -w g-counter --bin out/Glomers/assembly.dest/out.jar --node-count 3 --rate 100 --time-limit 20 --nemesis partitio
+```
+
+The maelstrom check for this workload failed [once](https://github.com/madtrick/gossip-glomers-scala/issues/3). Every other time I tried it worked fine.
