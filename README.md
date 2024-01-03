@@ -101,3 +101,11 @@ GLOMER=counter ./maelstrom/maelstrom test -w g-counter --bin out/Glomers/assembl
 ```
 
 The maelstrom check for this workload failed [once](https://github.com/madtrick/gossip-glomers-scala/issues/3). Every other time I tried it worked fine.
+
+## Kafka-style log
+
+[Challenge #5a: Single-Node Kafka-Style Log](https://fly.io/dist-sys/5a/)
+
+```sh
+GLOMER=kafka-log ./maelstrom/maelstrom test -w kafka --bin out/Glomers/assembly.dest/out.jar --node-count 1 --concurrency 2n --time-limit 20 --rate 1000
+```

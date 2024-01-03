@@ -14,26 +14,183 @@ import scala.concurrent.Promise
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicInteger
+import scala.collection.mutable.HashMap
 
-class ConcurrencyProof {
-  def run = {
-    val f: Future[String] = Future {
-      Thread.sleep(20000)
-      "future value"
-    }
+class KafkaLikeLogs {
+  private var msgCounter                                       = new AtomicInteger(0)
+  private var nodeId: Option[NodeId]                           = None
+  private val logs: ConcurrentHashMap[String, ListBuffer[Int]] = new ConcurrentHashMap()
+  // NOTE: possible I can combine both the `offsets` and `commit_offsets` maps.
+  // For each log I could keep two properties `offset` and `committed_offset`
+  private val offsets: ConcurrentHashMap[String, Int]        = new ConcurrentHashMap[String, Int]()
+  private val commit_offsets: ConcurrentHashMap[String, Int] = new ConcurrentHashMap[String, Int]()
 
-    f.onComplete {
-      case s => {
-        Console.println("Console.println OK!")
-        System.out.println("System.out.println OK!")
+  def log(msg: String): Unit = {
+    System.err.println(msg)
+  }
+  def send(msg: String): Unit = {
+    log(s"[send] $msg")
+    println(msg)
+  }
+
+  def run(): Unit = {
+    for (line <- io.Source.stdin.getLines()) {
+      log(s"[recv] $line")
+      val json = ujson.read(line)
+
+      val src     = json("src").str
+      val dest    = json("dest").str
+      val msgType = json("body")("type").str
+      val msgId   = json("body").obj.get("msg_id")
+
+      msgType match {
+        case "init" => {
+          nodeId = Some(NodeId(json("body")("node_id").str))
+
+          send(
+            ujson.write(
+              ujson.Obj(
+                "src"  -> dest,
+                "dest" -> src,
+                "body" -> ujson.Obj(
+                  "type"        -> "init_ok",
+                  "in_reply_to" -> msgId.get.num.toInt,
+                  "msg_id"      -> msgCounter.incrementAndGet()
+                )
+              )
+            )
+          )
+        }
+        case "send" => {
+          val key         = json("body")("key").str
+          val msg         = json("body")("msg").num.toInt
+          var offset: Int = -1
+
+          if (logs.containsKey(key)) {
+            offset = logs.get(key).size
+            logs.get(key).append(msg)
+            offsets.put(key, offset)
+          } else {
+            val listb: ListBuffer[Int] = new ListBuffer[Int]()
+            listb.append(msg)
+            logs.put(key, listb)
+            offset = 0
+            offsets.put(key, offset)
+          }
+
+          send(
+            ujson.write(
+              ujson.Obj(
+                "src"  -> nodeId.get.id,
+                "dest" -> src,
+                "body" -> ujson.Obj(
+                  "type"        -> "send_ok",
+                  "in_reply_to" -> msgId.get.num.toInt,
+                  "msg_id"      -> msgCounter.incrementAndGet(),
+                  "offset"      -> offset
+                )
+              )
+            )
+          )
+        }
+        case "poll" => {
+          val offsets                                  = json("body")("offsets").obj
+          val response: HashMap[String, Seq[Seq[Int]]] = new HashMap()
+          val lists                                    = ListBuffer()
+
+          log(s"[info] offsets $offsets")
+
+          for (key <- offsets.keySet) {
+            val log = logs.get(key)
+
+            if (log != null) {
+              val offset = offsets(key).num.toInt
+              // NOTE: would this be a performance-wise ok operation to do?
+              // Dropping and converting to a list?
+              var counter = 0
+              val loggedFromOfsset =
+                log
+                  .drop(offset)
+                  .map((v) => {
+                    val pollItem = List(offset + counter, v)
+                    counter += 1
+                    pollItem
+                  })
+                  .toList
+
+              response.put(key, loggedFromOfsset)
+
+            }
+          }
+
+          send(
+            ujson.write(
+              ujson.Obj(
+                "src"  -> nodeId.get.id,
+                "dest" -> src,
+                "body" -> ujson.Obj(
+                  "type"        -> "poll_ok",
+                  "in_reply_to" -> msgId.get.num.toInt,
+                  "msg_id"      -> msgCounter.incrementAndGet(),
+                  "msgs"        -> response
+                )
+              )
+            )
+          )
+        }
+        case "commit_offsets" => {
+          val offsets = json("body")("offsets").obj
+
+          for (key <- offsets.keySet) {
+            val offset = offsets(key).num.toInt
+            commit_offsets.put(key, offset)
+          }
+
+          send(
+            ujson.write(
+              ujson.Obj(
+                "src"  -> nodeId.get.id,
+                "dest" -> src,
+                "body" -> ujson.Obj(
+                  "type"        -> "commit_offsets_ok",
+                  "in_reply_to" -> msgId.get.num.toInt,
+                  "msg_id"      -> msgCounter.incrementAndGet()
+                )
+              )
+            )
+          )
+        }
+        case "list_committed_offsets" => {
+          val keys                           = json("body")("keys").arr.toList
+          val response: HashMap[String, Int] = new HashMap()
+
+          for (keyAsValue <- keys) {
+            val key = keyAsValue.str
+            if (commit_offsets.containsKey(key)) {
+              val offset = commit_offsets.get(key)
+              response.put(key, offset)
+            }
+          }
+
+          send(
+            ujson.write(
+              ujson.Obj(
+                "src"  -> nodeId.get.id,
+                "dest" -> src,
+                "body" -> ujson.Obj(
+                  "type"        -> "list_committed_offsets_ok",
+                  "in_reply_to" -> msgId.get.num.toInt,
+                  "msg_id"      -> msgCounter.incrementAndGet(),
+                  "offsets"     -> response
+                )
+              )
+            )
+          )
+        }
       }
     }
-
-    println("Gracias")
-
-    Await.ready(f, 60 seconds)
-    ()
   }
+
 }
 
 class GrowOnlyCounter {
@@ -557,10 +714,10 @@ object Broadcast {
 object Main extends App {
   if (sys.env.get("GLOMER").get == "broadcast") {
     new Broadcast().run()
-  } else if (sys.env.get("GLOMER").get == "concurrency") {
-    new ConcurrencyProof().run
   } else if (sys.env.get("GLOMER").get == "counter") {
     new GrowOnlyCounter().run
+  } else if (sys.env.get("GLOMER").get == "kafka-log") {
+    new KafkaLikeLogs().run
   } else {
     var msgCounter             = 0
     var nodeId: Option[String] = None
